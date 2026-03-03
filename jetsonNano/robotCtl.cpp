@@ -11,6 +11,12 @@
 #include <thread>
 #include <unistd.h>
 #include <vector>
+#include <mutex>
+#include <chrono>
+
+std::mutex rxMutex;
+std::string latestRx;     // last received line (already formatted)
+bool rxDirty = false;     // new data arrived since last print
 
 static int clampi(int v, int lo, int hi) {
     return std::max(lo, std::min(hi, v));
@@ -23,6 +29,7 @@ static bool set_interface_attribs(int fd, int baud) {
         return false;
     }
 
+    
     cfmakeraw(&tty);
 
     speed_t speed = B115200;
@@ -159,7 +166,7 @@ static bool parse_robot_info(const std::string& line,
 }
 
 int main(int argc, char** argv) {
-    const char *PORT = (argc >= 2) ? argv[1] : "/dev/ttyUSB0";
+    const char *PORT = (argc >= 2) ? argv[1] : "/dev/ttyUSB0"; //with argment ./robotCtl /dev/ttyUSB1 or default /dev/ttyUSB0
     const int BAUD = 115200;
 
     int fd = open(PORT, O_RDWR | O_NOCTTY | O_SYNC);
@@ -184,25 +191,34 @@ int main(int argc, char** argv) {
 
     std::atomic<bool> running{true};
 
-    // RX thread: permanently read + parse
-    // std::thread rxThread([&](){
-    //     while (running.load()) {
-    //         std::string line;
-    //         if (!read_line(fd, line)) continue;
-    //         if (line.empty()) continue;
+    //RX thread: permanently read + parse
+    std::thread rxThread([&](){
+        while (running.load()) {
+            std::string line;
+            if (!read_line(fd, line)) continue;
+            if (line.empty()) continue;
 
-    //         int leftPct, rightPct, encR, encL, encLS;
-    //         if (parse_robot_info(line, leftPct, rightPct, encR, encL, encLS)) {
-    //             std::cerr << "\n RX: left=" << leftPct
-    //                       << "% right=" << rightPct
-    //                       << "% encR=" << encR
-    //                       << " encL=" << encL
-    //                       << " encLS=" << encLS << "\n";
-    //         } else {
-    //             std::cerr << "\n RX(unparsed): " << line << "\n";
-    //         }
-    //     }
-    // });
+            int leftPct, rightPct, encR, encL, encLS;
+            std::string formatted;
+
+            if (parse_robot_info(line, leftPct, rightPct, encR, encL, encLS)) {
+                formatted = "RX left=" + std::to_string(leftPct) +
+                            "% right=" + std::to_string(rightPct) +
+                            "% encR=" + std::to_string(encR) +
+                            " encL=" + std::to_string(encL) +
+                            " encLS=" + std::to_string(encLS);
+            } else {
+                formatted = "RX " + line;
+            }
+
+            {
+                std::lock_guard<std::mutex> lk(rxMutex);
+                latestRx = std::move(formatted);
+                rxDirty = true;
+            }
+        }
+    });
+
 
     std::cout << "Opened " << PORT << " @ " << BAUD << "\n"
               << "Keys: W forward | S back | A left(in-place) | D right(in-place)\n"
@@ -249,16 +265,47 @@ int main(int argc, char** argv) {
             cmd.dirR != lastSent.dirR || cmd.dirL != lastSent.dirL) {
             if (write_motor(fd, cmd)) {
                 lastSent = cmd;
-                std::cout << "\rTX: " << cmd.pwmR << "," << cmd.pwmL << ","
-                          << cmd.dirR << "," << cmd.dirL << "      " << std::flush;
             }
+        }
+        auto lastPrint = std::chrono::steady_clock::now();
+        std::string lastRxPrinted;
+        // 1 Hz display (same line, no newline)
+        auto now = std::chrono::steady_clock::now();
+        if (now - lastPrint >= std::chrono::seconds(1)) {
+            std::string rxCopy;
+            bool haveNew = false;
+            {
+                std::lock_guard<std::mutex> lk(rxMutex);
+                if (rxDirty) {
+                    rxCopy = latestRx;
+                    rxDirty = false;
+                    haveNew = true;
+                }
+            }
+            if (haveNew) lastRxPrinted = std::move(rxCopy);
+
+            // Build one status line: TX + RX (pad to clear leftovers)
+            std::string line = "TX: " + std::to_string(lastSent.pwmR) + "," +
+                            std::to_string(lastSent.pwmL) + "," +
+                            std::to_string(lastSent.dirR) + "," +
+                            std::to_string(lastSent.dirL) +
+                            " | " + lastRxPrinted;
+
+            // Clear line by padding/truncation
+            if (line.size() < 120) line.append(120 - line.size(), ' ');
+            else line.resize(120);
+
+            std::cout << "\r" << line << std::flush;
+            lastPrint = now;
         }
 
         usleep(10 * 1000);
     }
 
-    // if (rxThread.joinable()) rxThread.join();
-    // close(fd);
-    // std::cout << "\nExit.\n";
-    // return 0;
+    if (rxThread.joinable()) rxThread.join();
+    close(fd);
+    std::cout << "\nExit.\n";
+
+
+    return 0;
 }
