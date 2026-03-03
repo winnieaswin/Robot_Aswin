@@ -32,7 +32,7 @@ const int pwmLeftChannel = 0;
 const int pwmRightChannel = 1;
 const int resolution = 8;
 int dutyCycle = 50;
-char buffer[64];
+static char txbuf[96];
 
 
 static int32_t lastPosition = -1;
@@ -47,7 +47,7 @@ int angle2 = 20;
 ESP32Encoder encoderLeftMain;
 ESP32Encoder encoderLeftSec;
 ESP32Encoder encoderRightMain;
-ESP32Encoder encoderRightSec;
+// ESP32Encoder encoderRightSec;
 
 
 // Création de l'objet PCA9685 (adresse par défaut 0x40)
@@ -76,13 +76,14 @@ void infoRobot ();
 bool readSerial2Line(String &outLine);
 MotorMessage parseMotorMessagePct(const String &line);
 static uint16_t pctToDuty8(uint8_t pct);
+static void applyMotor(const MotorMessage &m);
+static void stopMotors();
 void setup() {
   // put your setup code here, to run once:
  
   Serial.begin(115200);
   Serial.println("Serial Uart available");
   Serial2.begin(115200,SERIAL_8N1,RXD2,TXD2);
-  Serial2.println("Serial 2 Uart from esp32");
   
   pinMode(Ledboard, OUTPUT);
   pinMode(mtLeftDir, OUTPUT);
@@ -102,11 +103,13 @@ void setup() {
   encoderLeftMain.setCount(0);
   encoderLeftSec.attachHalfQuad(secLeftEncoder_A, secLeftEncoder_B);
   encoderLeftSec.setCount(0);
+  stopMotors();
 
   // init PCA9685
   pwm.begin();
   pwm.setOscillatorFrequency(27000000);
   pwm.setPWMFreq(SERVO_FREQ);  
+  Serial.println("ESP32 motor controller ready.");
 
 }
 
@@ -118,52 +121,39 @@ void loop() {
 
 
   digitalWrite (Ledboard, HIGH);
-  Serial.println("Led High");
-  Serial2.println("Led High Serial2");
     // Exemple : changer la direction toutes les 2 secondes
   setServoAngle (0,angle1);
   setServoAngle (1,angle1);
-  infoRobot ();
-   String line;
+  String line;
   if (readSerial2Line(line)) {
     MotorMessage msg = parseMotorMessagePct(line);
 
-    if (!msg.valid) {
-      Serial.print("Bad message: ");
-      Serial.println(line);
-      return;
+    if (msg.valid) {
+      applyMotor(msg);
+      Serial.print("OK pctR=");
+      Serial.print(msg.pwmRightPct);
+      Serial.print("% pctL=");
+      Serial.print(msg.pwmLeftPct);
+      Serial.print("% dirR=");
+      Serial.print(msg.dirRight);
+      Serial.print(" dirL=");
+      Serial.print(msg.dirLeft);
+      Serial.print(" dutyR=");
+      Serial.print(msg.dutyRight);
+      Serial.print(" dutyL=");
+      Serial.println(msg.dutyLeft);
     }
-
-    Serial.print("OK pctR=");
-    Serial.print(msg.pwmRightPct);
-    Serial.print("% pctL=");
-    Serial.print(msg.pwmLeftPct);
-    Serial.print("% dirR=");
-    Serial.print(msg.dirRight);
-    Serial.print(" dirL=");
-    Serial.print(msg.dirLeft);
-    Serial.print(" dutyR=");
-    Serial.print(msg.dutyRight);
-    Serial.print(" dutyL=");
-    Serial.println(msg.dutyLeft);
-
-    // TODO: apply msg.dirRight/msg.dirLeft to direction pins
-    // TODO: write msg.dutyRight/msg.dutyLeft to LEDC PWM channels
+    else {
+        Serial.print("Bad message: ");
+        Serial.println(line);
+    }
+    
   }
 
-
-  sleep (1);
-  if (dutyCycle >= 150) {
-    dutyCycle = 30;
-  }
-  else {
-    dutyCycle += 10;
-  }
-  if (angle1 >= 160){
-    angle1 = 10;
-  }
-  else {
-    angle1 +=20;
+static uint32_t lastInfo = 0;
+  if (millis() - lastInfo >= 100) {  // 10 Hz
+    lastInfo = millis();
+    infoRobot();
   }
 }
 
@@ -177,24 +167,24 @@ void setServoAngle(uint8_t n, double angle) {
   pwm.setPWM(n, 0, pulse);
 }
 
-void infoRobot () {
-  uint16_t leftObstacleCur = adcToPercent(analogRead(mtLeftCur_ADC));
-  uint16_t rightObstacleCur = adcToPercent(analogRead(mtRightCur_ADC));
-  encoderCntRightMain = encoderRightMain.getCount();
-  // encoderCntRightSec = encoderRightSec.getCount(); // hardware doesn't work
-  encoderCntLeftMain = encoderLeftMain.getCount();
-  encoderCntLeftSec = encoderLeftSec.getCount();
-  sprintf(buffer, " %d, %d, %d, %d, %d", adcToPercent(leftObstacleCur),adcToPercent(rightObstacleCur), encoderCntRightMain,encoderCntLeftMain,encoderCntLeftSec);
-  Serial.println(buffer);
-  Serial2.println(buffer);
+void infoRobot() {
+  uint8_t leftPct  = adcToPercent(analogRead(mtLeftCur_ADC));
+  uint8_t rightPct = adcToPercent(analogRead(mtRightCur_ADC));
 
+  long encR = (long)encoderRightMain.getCount();
+  long encL = (long)encoderLeftMain.getCount();
+
+  // CSV for Jetson: leftPct,rightPct,encR,encL
+  snprintf(txbuf, sizeof(txbuf), "%u,%u,%ld,%ld", leftPct, rightPct, encR, encL);
+
+  Serial2.println(txbuf);   // DATA ONLY to Jetson
+  // Serial.println(txbuf); // optional debug to USB
 }
 
 
 static uint8_t adcToPercent(uint16_t adc) {
-  if (adc < 0) adc = 0;
   if (adc > 4095) adc = 4095;
-  return (uint8_t)((adc * 100) / 4095);
+  return (uint8_t)((adc * 100UL) / 4095UL);
 }
 
 // Reads one '\n' terminated line from Serial2 (non-blocking-ish)
@@ -253,4 +243,22 @@ MotorMessage parseMotorMessagePct(const String &line) {
 // Convert 0..100% to 0..255 (rounded)
 static uint16_t pctToDuty8(uint8_t pct) {
   return (uint16_t)((pct * 255 + 50) / 100);
+}
+
+static void applyMotor(const MotorMessage &m) {
+  // Direction pins
+  digitalWrite(mtRightDir, m.dirRight ? HIGH : LOW);
+  digitalWrite(mtLeftDir,  m.dirLeft ? LOW : HIGH);
+
+  // Duty
+  uint16_t dutyR = pctToDuty8(m.pwmRightPct);
+  uint16_t dutyL = pctToDuty8(m.pwmLeftPct);
+
+  ledcWrite(pwmRightChannel, dutyR);
+  ledcWrite(pwmLeftChannel,  dutyL);
+}
+
+static void stopMotors() {
+  ledcWrite(pwmRightChannel, 0);
+  ledcWrite(pwmLeftChannel,  0);
 }
