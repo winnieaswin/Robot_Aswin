@@ -22,8 +22,8 @@ const int mtRightDir = 13;
 const int mtRightCur_ADC = 35; //adc input
 const int mtRightEncoder_1 = 26;
 const int mtRightEncoder_2 = 14;
-const int secRightEncoder_A = 36;
-const int secRightEncoder_B = 39;
+const int secRightEncoder_A = 4;
+const int secRightEncoder_B = 5;
 
 
 // Setting PWM properties
@@ -47,7 +47,7 @@ int angle2 = 20;
 ESP32Encoder encoderLeftMain;
 ESP32Encoder encoderLeftSec;
 ESP32Encoder encoderRightMain;
-// ESP32Encoder encoderRightSec;
+ESP32Encoder encoderRightSec;
 
 
 // Création de l'objet PCA9685 (adresse par défaut 0x40)
@@ -95,10 +95,14 @@ void setup() {
   ledcAttachPin(mtRightPwm,pwmRightChannel);
 
   // init encorder
+  pinMode(secLeftEncoder_A, INPUT_PULLUP);
+  pinMode(secLeftEncoder_B, INPUT_PULLUP);
+  pinMode(secRightEncoder_A, INPUT_PULLUP);
+  pinMode(secRightEncoder_B, INPUT_PULLUP);
   encoderRightMain.attachHalfQuad(mtRightEncoder_1, mtRightEncoder_2);
   encoderRightMain.setCount(0);   // Initialise le compteur à 0
-  // encoderRightSec.attachHalfQuad(secRightEncoder_A, secRightEncoder_B);
-  // encoderRightSec.setCount(0);
+  encoderRightSec.attachHalfQuad(secRightEncoder_A, secRightEncoder_B);
+  encoderRightSec.setCount(0);
   encoderLeftMain .attachHalfQuad(mtLeftEncoder_1, mtLeftEncoder_2);
   encoderLeftMain.setCount(0);
   encoderLeftSec.attachHalfQuad(secLeftEncoder_A, secLeftEncoder_B);
@@ -173,11 +177,14 @@ void infoRobot() {
 
   long encR = (long)encoderRightMain.getCount();
   long encL = (long)encoderLeftMain.getCount();
+  long encSecR = (long)encoderRightSec.getCount();
+  long encSecL = (long)encoderLeftSec.getCount();
 
   // CSV for Jetson: leftPct,rightPct,encR,encL
-  snprintf(txbuf, sizeof(txbuf), "%u,%u,%ld,%ld", leftPct, rightPct, encR, encL);
+  snprintf(txbuf, sizeof(txbuf), "%u,%u,%ld,%ld,%ld,%ld", leftPct, rightPct, encR, encL, encSecR, encSecL);
 
   Serial2.println(txbuf);   // DATA ONLY to Jetson
+  Serial.println(txbuf);
   // Serial.println(txbuf); // optional debug to USB
 }
 
